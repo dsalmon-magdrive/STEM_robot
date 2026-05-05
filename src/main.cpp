@@ -1,4 +1,5 @@
 #include <Arduino.h>
+#include <WiFiNINA.h>
 
 #define MOTOR1_EN 4
 #define MOTOR1_IN1 2
@@ -13,6 +14,16 @@
 #define MOTOR3_IN2 10
 
 #define DEBUG 1
+
+// WiFi configuration
+char ssid[] = "WXP_Robot";  // SSID for the Arduino's WiFi AP
+char pass[] = "12345678";   // Password for the Arduino's WiFi AP
+IPAddress local_ip(192, 168, 1, 1);
+IPAddress gateway(192, 168, 1, 1);
+IPAddress subnet(255, 255, 255, 0);
+
+WiFiServer server(80);
+int status = WL_IDLE_STATUS;
 
 struct motion_vector {
   float angle_degrees;
@@ -198,6 +209,173 @@ void apply_impulse(float impulse_magnitude, float impulse_angle_degrees) {
 
 }
 
+// Web server handler
+void handleClient(WiFiClient client) {
+  String request = "";
+  String path = "/";
+  String method = "GET";
+  bool isPost = false;
+  String postData = "";
+  
+  #if DEBUG
+  Serial.println("Client connected");
+  #endif
+  
+  // Read the request line with timeout
+  unsigned long startTime = millis();
+  while (client.connected() && (millis() - startTime < 1000)) {
+    if (client.available()) {
+      char c = client.read();
+      request += c;
+      if (request.length() > 2 && request.endsWith("\r\n")) {
+        break;
+      }
+    }
+  }
+  
+  #if DEBUG
+  Serial.print("Request: ");
+  Serial.println(request);
+  #endif
+  
+  // Parse method and path
+  int firstSpace = request.indexOf(' ');
+  int secondSpace = request.indexOf(' ', firstSpace + 1);
+  if (firstSpace > 0 && secondSpace > firstSpace) {
+    method = request.substring(0, firstSpace);
+    path = request.substring(firstSpace + 1, secondSpace);
+    isPost = (method == "POST");
+  }
+  
+  #if DEBUG
+  Serial.print("Method: ");
+  Serial.print(method);
+  Serial.print(" Path: ");
+  Serial.println(path);
+  #endif
+  
+  // Read headers and body
+  int contentLength = 0;
+  startTime = millis();
+  while (client.connected() && (millis() - startTime < 1000)) {
+    String line = "";
+    while (client.available()) {
+      char c = client.read();
+      if (c == '\n') break;
+      if (c != '\r') line += c;
+    }
+    
+    if (line.length() == 0) break; // Empty line = end of headers
+    
+    if (line.startsWith("Content-Length:")) {
+      contentLength = line.substring(15).toInt();
+      #if DEBUG
+      Serial.print("Content-Length: ");
+      Serial.println(contentLength);
+      #endif
+    }
+  }
+  
+  // Read POST data if present
+  if (isPost && contentLength > 0) {
+    int remaining = contentLength;
+    startTime = millis();
+    while (remaining > 0 && (millis() - startTime < 1000)) {
+      if (client.available()) {
+        postData += (char)client.read();
+        remaining--;
+      }
+    }
+    #if DEBUG
+    Serial.print("POST data: ");
+    Serial.println(postData);
+    #endif
+  }
+  
+  // Route handling
+  if (path == "/" || path == "/index.html") {
+    String massStr = String(mass, 1);
+    String massDisplay = String(mass, 2);
+    
+    String html = "<!DOCTYPE html><html><head><title>WXP Robot Configuration</title>";
+    html += "<meta name='viewport' content='width=device-width, initial-scale=1'>";
+    html += "<style>body{font-family:Arial,sans-serif;margin:20px;background-color:#f0f0f0;}";
+    html += ".container{background-color:white;padding:20px;border-radius:8px;max-width:400px;margin:0 auto;box-shadow:0 2px 4px rgba(0,0,0,0.1);}";
+    html += "h1{color:#333;text-align:center;}.form-group{margin:15px 0;}label{display:block;margin-bottom:5px;color:#555;font-weight:bold;}";
+    html += "input[type='number']{width:100%;padding:8px;border:1px solid #ddd;border-radius:4px;box-sizing:border-box;font-size:16px;}";
+    html += "button{width:100%;padding:10px;background-color:#4CAF50;color:white;border:none;border-radius:4px;cursor:pointer;font-size:16px;margin-top:10px;}";
+    html += "button:hover{background-color:#45a049;}.info{background-color:#e3f2fd;padding:10px;border-radius:4px;margin-top:20px;color:#1976d2;}";
+    html += "</style></head><body><div class='container'><h1>WXP Robot Configuration</h1>";
+    html += "<form method='POST' action='/update'><div class='form-group'>";
+    html += "<label for='mass'>Robot Mass (kg):</label>";
+    html += "<input type='number' id='mass' name='mass' step='0.1' min='0.1' value='" + massStr + "' required>";
+    html += "</div><button type='submit'>Update Mass</button></form>";
+    html += "<div class='info'><p><strong>Current Mass:</strong> " + massDisplay + " kg</p>";
+    html += "<p>Adjust the mass value to match your robot's weight for accurate physics calculations.</p>";
+    html += "</div></div></body></html>";
+    
+    client.print("HTTP/1.1 200 OK\r\n");
+    client.print("Content-Type: text/html\r\n");
+    client.print("Content-Length: ");
+    client.print(html.length());
+    client.print("\r\n");
+    client.print("Connection: close\r\n");
+    client.print("\r\n");
+    client.print(html);
+    
+    #if DEBUG
+    Serial.println("Sent HTML response");
+    #endif
+  } 
+  else if (path == "/update" && isPost) {
+    // Parse mass from POST data (format: mass=value)
+    int massStart = postData.indexOf("mass=");
+    if (massStart != -1) {
+      String massStr = postData.substring(massStart + 5);
+      float new_mass = massStr.toFloat();
+      if (new_mass > 0.0) {
+        mass = new_mass;
+        #if DEBUG
+        Serial.print("Mass updated to: ");
+        Serial.println(mass);
+        #endif
+      }
+    }
+    
+    // Send redirect response
+    client.print("HTTP/1.1 303 See Other\r\n");
+    client.print("Location: /\r\n");
+    client.print("Connection: close\r\n");
+    client.print("\r\n");
+    
+    #if DEBUG
+    Serial.println("Sent redirect response");
+    #endif
+  } 
+  else {
+    String notFound = "404: Not Found";
+    client.print("HTTP/1.1 404 Not Found\r\n");
+    client.print("Content-Type: text/plain\r\n");
+    client.print("Content-Length: ");
+    client.print(notFound.length());
+    client.print("\r\n");
+    client.print("Connection: close\r\n");
+    client.print("\r\n");
+    client.print(notFound);
+    
+    #if DEBUG
+    Serial.println("Sent 404 response");
+    #endif
+  }
+  
+  delay(10);
+  client.stop();
+  
+  #if DEBUG
+  Serial.println("Client disconnected");
+  #endif
+}
+
 void setup() {
 
   // Initialize Serial communication for debugging
@@ -242,6 +420,36 @@ void setup() {
   Serial.println(motion_vector.angle_degrees);
   #endif
 
+  // Initialize WiFi as an Access Point
+  #if DEBUG
+  Serial.println("Starting WiFi AP...");
+  #endif
+  
+  status = WiFi.beginAP(ssid, pass);
+  delay(1000);
+  WiFi.config(local_ip, gateway, subnet);
+
+  if (status != WL_AP_LISTENING)
+  {
+    #if DEBUG
+    Serial.println("Creating access point failed");
+    #endif
+  }
+  
+  #if DEBUG
+  Serial.print("WiFi AP started. SSID: ");
+  Serial.println(ssid);
+  Serial.print("IP Address: ");
+  Serial.println(WiFi.localIP());
+  #endif
+
+  // Start the server
+  server.begin();
+  
+  #if DEBUG
+  Serial.println("Web server started on http://192.168.1.1");
+  #endif
+
   Serial.println("----------");
   apply_impulse(1.0, 45.0); // Example impulse of magnitude 1.0 at a 45 degree angle
   delay(1000);
@@ -258,54 +466,27 @@ void setup() {
 }
 
 void loop() {
+  WiFiClient client = server.available();
+  if (client) {
+    handleClient(client);
+  }
 
+    // compare the previous status to the current status
+  if (status != WiFi.status())
+  {
+    // it has changed update the variable
+    status = WiFi.status();
 
-
-
-  // Test the set_motor_speeds function with different angles and a fixed speed
-  // float speed = 0.5;
-  // int delay_time = 1000;
-
-  // Serial.println("Angle = 0");
-  // set_motion(0, speed);
-  // delay(delay_time);
-  // set_motion(0, 0);
-  // delay(delay_time*2);
-
-  // Serial.println("Angle = 30");
-  // set_motion(30, speed);
-  // delay(delay_time);
-  // set_motion(0, 0);
-  // delay(delay_time*2);
-
-  // Serial.println("Angle = 60");
-  // set_motion(60, speed);
-  // delay(delay_time);
-  // set_motion(0, 0);
-  // delay(delay_time*2);
-
-  // Serial.println("Angle = -30");
-  // set_motion(-30, speed);
-  // delay(delay_time);
-  // set_motion(0, 0);
-  // delay(delay_time*2);
-
-  // Serial.println("Angle = -60");
-  // set_motion(-60, speed);
-  // delay(delay_time);
-  // set_motion(0, 0);
-  // delay(delay_time*2);
-
-  // Serial.println("Angle = 180");
-  // set_motion(180, speed);
-  // delay(delay_time);
-  // set_motion(0, 0);
-  // delay(delay_time*2);
-
-  // Serial.println("Angle = 270");
-  // set_motion(270, speed);
-  // delay(delay_time);
-  // set_motion(0, 0);
-  // delay(delay_time*2);
+    if (status == WL_AP_CONNECTED)
+    {
+      // a device has connected to the AP
+      Serial.println("Device connected to AP");
+    }
+    else
+    {
+      // a device has disconnected from the AP, and we are back in listening mode
+      Serial.println("Device disconnected from AP");
+    }
+  }
 
 }
