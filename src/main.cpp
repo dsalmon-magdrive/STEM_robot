@@ -31,6 +31,7 @@ struct motion_vector {
 } motion_vector;
 
 float mass = 2.0; // Mass of the robot (kg) - adjust as needed for more accurate physics calculations
+float speedScalingFactor = 255.0; // PWM units per m/s - calibrate by measuring actual speed at PWM 255
 
 struct Impulse {
   float time;
@@ -54,14 +55,14 @@ void set_motion(int bearing_degrees, float speed) {
   float theta_C = bearing_degrees - 60.0;
 
   // Calculate motor speeds based on the desired bearing and speed
-  float motor1_speed = (speed * (float)255) * sin(theta_A * (PI / 180.0));
-  float motor2_speed = (speed * (float)255) * sin(theta_B * (PI / 180.0));
-  float motor3_speed = (speed * (float)255) * sin(theta_C * (PI / 180.0));
+  float motor1_speed = (speed * speedScalingFactor) * sin(theta_A * (PI / 180.0));
+  float motor2_speed = (speed * speedScalingFactor) * sin(theta_B * (PI / 180.0));
+  float motor3_speed = (speed * speedScalingFactor) * sin(theta_C * (PI / 180.0));
 
-  // Convert motor speeds to integers for PWM output
-  int motor1_speed_int = (int) round(motor1_speed);
-  int motor2_speed_int = (int) round(motor2_speed);
-  int motor3_speed_int = (int) round(motor3_speed);
+  // Convert motor speeds to integers for PWM output and constrain to valid range
+  int motor1_speed_int = (int) round(constrain(motor1_speed, -255.0, 255.0));
+  int motor2_speed_int = (int) round(constrain(motor2_speed, -255.0, 255.0));
+  int motor3_speed_int = (int) round(constrain(motor3_speed, -255.0, 255.0));
 
   // Debugging output to Serial Monitor
   #if DEBUG
@@ -442,6 +443,7 @@ void handleClient(WiFiClient client) {
   if (path == "/" || path == "/index.html") {
     String massStr = String(mass, 1);
     String massDisplay = String(mass, 2);
+    String scalingStr = String(speedScalingFactor, 2);
     String statusDisplay = impulseRunning ? "running" : impulseStatus;
     String impulseListSummary = String(impulseCount) + " impulse" + (impulseCount == 1 ? "" : "s");
 
@@ -456,14 +458,19 @@ void handleClient(WiFiClient client) {
     html += "</style></head><body><div class='container'><h1>WXP Robot Configuration</h1>";
 
     html += "<div class='info'><p><strong>Current Mass:</strong> " + massDisplay + " kg</p>";
+    html += "<p><strong>Speed Scaling Factor:</strong> " + scalingStr + " PWM units/m/s</p>";
     html += "<p><strong>Impulse status:</strong> " + statusDisplay + "</p>";
     html += "<p><strong>Loaded impulses:</strong> " + impulseListSummary + "</p>";
+    html += "<p><em>To calibrate speed: Set robot to full speed (PWM 255), measure time over known distance, then set scaling factor = 255 / actual_speed_m_per_s</em></p>";
     html += "</div>";
 
     html += "<form method='POST' action='/update'><div class='form-group'>";
     html += "<label for='mass'>Robot Mass (kg):</label>";
     html += "<input type='number' id='mass' name='mass' step='0.1' min='0.1' value='" + massStr + "' required>";
-    html += "</div><button type='submit'>Update Mass</button></form>";
+    html += "</div><div class='form-group'>";
+    html += "<label for='scaling'>Speed Scaling Factor (PWM units/m/s):</label>";
+    html += "<input type='number' id='scaling' name='scaling' step='0.01' min='0.01' value='" + scalingStr + "' required>";
+    html += "</div><button type='submit'>Update Configuration</button></form>";
 
     html += "<form method='POST' action='/run'><div class='form-group'>";
     html += "<label for='impulses'>Impulses (#time, angle, magnitude):</label>";
@@ -488,16 +495,33 @@ void handleClient(WiFiClient client) {
     #endif
   } 
   else if (path == "/update" && isPost) {
-    // Parse mass from POST data (format: mass=value)
+    // Parse mass from POST data (format: mass=value&scaling=value)
     int massStart = postData.indexOf("mass=");
     if (massStart != -1) {
       String massStr = postData.substring(massStart + 5);
+      int amp = massStr.indexOf('&');
+      if (amp != -1) massStr = massStr.substring(0, amp);
       float new_mass = massStr.toFloat();
       if (new_mass > 0.0) {
         mass = new_mass;
         #if DEBUG
         Serial.print("Mass updated to: ");
         Serial.println(mass);
+        #endif
+      }
+    }
+    
+    int scalingStart = postData.indexOf("scaling=");
+    if (scalingStart != -1) {
+      String scalingStr = postData.substring(scalingStart + 8);
+      int amp = scalingStr.indexOf('&');
+      if (amp != -1) scalingStr = scalingStr.substring(0, amp);
+      float new_scaling = scalingStr.toFloat();
+      if (new_scaling > 0.0) {
+        speedScalingFactor = new_scaling;
+        #if DEBUG
+        Serial.print("Speed scaling factor updated to: ");
+        Serial.println(speedScalingFactor);
         #endif
       }
     }
